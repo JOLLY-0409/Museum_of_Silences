@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Museum of Silences</title>
+<style>
+:root{--bg:#f4f0e8;--fg:#1d1a16;--muted:#6f675c;--card:#fffdf8;--line:#d9d1c2;--accent:#b4562b;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f0e0c;--fg:#ece6da;--muted:#9a9184;--card:#171512;--line:#2b2722;--accent:#e08a5c}}
+:root[data-theme="dark"]{--bg:#0f0e0c;--fg:#ece6da;--muted:#9a9184;--card:#171512;--line:#2b2722;--accent:#e08a5c}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:Georgia,'Times New Roman',serif;line-height:1.5}
+.wrap{max-width:900px;margin:0 auto;padding:28px 18px 40px}
+h1{font-weight:400;font-size:clamp(28px,6vw,44px);margin:0;letter-spacing:.02em}
+.sub{color:var(--muted);margin:6px 0 22px;font-style:italic}
+.stage{position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--line);background:#000;aspect-ratio:16/10;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+canvas{display:block;width:100%;height:100%}
+.tag{position:absolute;left:14px;top:12px;font:12px/1 system-ui,sans-serif;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.65)}
+.info{margin:18px 2px 6px;min-height:96px}
+.info h2{font-weight:400;font-size:24px;margin:0 0 6px}
+.info p{margin:0;color:var(--muted);max-width:62ch}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:16px}
+button{font:14px system-ui,sans-serif;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:999px;padding:9px 15px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.rooms{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+.rooms button{padding:9px 13px}
+.hint{font:12px system-ui,sans-serif;color:var(--muted);margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Museum of Silences</h1>
+  <div class="sub">Nine rooms. Eight of them are silent. The ninth listens to you.</div>
+  <div class="stage"><canvas id="cv"></canvas><div class="tag" id="tag"></div></div>
+  <div class="info"><h2 id="ttl"></h2><p id="cap"></p></div>
+  <div class="bar">
+    <button id="prev" aria-label="Previous room">←</button>
+    <div class="rooms" id="rooms"></div>
+    <button id="next" aria-label="Next room">→</button>
+    <button id="tour">Auto tour</button>
+    <button id="snd">Sound: off</button>
+  </div>
+  <div class="hint">Best with headphones. Press Sound, then use ← → keys. In Room 4, click the water. Room 9 uses your microphone only to measure loudness on your device. Nothing is recorded or sent.</div>
+</div>
+<script>
+const cv=document.getElementById('cv'),c=cv.getContext('2d');
+let W=0,H=0,grainPat=null;
+function resize(){const d=window.devicePixelRatio||1,r=cv.getBoundingClientRect();W=r.width;H=r.height;cv.width=W*d;cv.height=H*d;c.setTransform(d,0,0,d,0,0)}
+addEventListener('resize',resize);
+
+/* film grain */
+const gr=document.createElement('canvas');gr.width=gr.height=160;
+(function(){const g=gr.getContext('2d'),id=g.createImageData(160,160);
+for(let i=0;i<id.data.length;i+=4){const v=Math.random()*255;id.data[i]=id.data[i+1]=id.data[i+2]=v;id.data[i+3]=255}
+g.putImageData(id,0,0)})();
+function finish(t){
+  if(!grainPat)grainPat=c.createPattern(gr,'repeat');
+  c.save();c.translate(-Math.random()*160,-Math.random()*160);c.globalAlpha=.075;c.fillStyle=grainPat;c.fillRect(0,0,W+160,H+160);c.restore();
+  const v=c.createRadialGradient(W/2,H/2,Math.min(W,H)*.35,W/2,H/2,Math.max(W,H)*.72);
+  v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,.6)');
+  c.fillStyle=v;c.fillRect(0,0,W,H);
+}
+
+/* ---------- realistic audio engine (all synthesised live) ---------- */
+let A=null,master=null,bus=null,nb=null,stops=[],soundOn=false;
+function initAudio(){
+  if(A)return;
+  A=new (window.AudioContext||window.webkitAudioContext)();
+  master=A.createGain();master.gain.value=0;master.connect(A.destination);
+  bus=A.createGain();bus.connect(master);
+  nb=A.createBuffer(1,A.sampleRate*3,A.sampleRate);
+  const d=nb.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  /* room reverb: decaying noise impulse response */
+  const len=Math.floor(A.sampleRate*2.8),ir=A.createBuffer(2,len,A.sampleRate);
+  for(let ch=0;ch<2;ch++){const x=ir.getChannelData(ch);for(let i=0;i<len;i++)x[i]=(Math.random()*2-1)*Math.pow(1-i/len,3)}
+  const conv=A.createConvolver();conv.buffer=ir;const wet=A.createGain();wet.gain.value=.38;
+  bus.connect(conv);conv.connect(wet);wet.connect(master);
+}
+function noise(freq,q,g,type,lfoHz,lfoDepth){
+  const s=A.createBufferSource();s.buffer=nb;s.loop=true;
+  const f=A.createBiquadFilter();f.type=type||'lowpass';f.frequency.value=freq;f.Q.value=q;
+  const gn=A.createGain();gn.gain.value=g;
+  s.connect(f);f.connect(gn);gn.connect(bus);s.start(0,Math.random()*2);
+  let o=null;
+  if(lfoHz){o=A.createOscillator();o.frequency.value=lfoHz;const d=A.createGain();d.gain.value=g*(lfoDepth||.5);o.connect(d);d.connect(gn.gain);o.start()}
+  return()=>{try{s.stop()}catch(e){}try{o&&o.stop()}catch(e){}};
+}
+function tone(freq,g,type){
+  const o=A.createOscillator(),gn=A.createGain();o.type=type||'sine';o.frequency.value=freq;gn.gain.value=g;
+  o.connect(gn);gn.connect(bus);o.start();return()=>{try{o.stop()}catch(e){}};
+}
+function drop(f0,f1,dur,g){
+  if(!A||!soundOn)return;
+  const o=A.createOscillator(),gn=A.createGain(),t=A.currentTime;
+  o.frequency.setValueAtTime(f0,t);o.frequency.exponentialRampToValueAtTime(f1,t+dur*.6);
+  gn.gain.setValueAtTime(0.0001,t);gn.gain.exponentialRampToValueAtTime(g,t+.005);gn.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  o.connect(gn);gn.connect(bus);o.start(t);o.stop(t+dur+.05);
+}
+function burst(freq,q,dur,g){
+  if(!A||!soundOn)return;
+  const s=A.createBufferSource();s.buffer=nb;
+  const f=A.createBiquadFilter();f.type='bandpass';f.frequency.value=freq;f.Q.value=q;
+  const gn=A.createGain(),t=A.currentTime;
+  gn.gain.setValueAtTime(g,t);gn.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  s.connect(f);f.connect(gn);gn.connect(bus);s.start(t,Math.random()*2,dur+.05);
+}
+function horn(){
+  if(!A||!soundOn)return;
+  const t=A.currentTime,gn=A.createGain(),f=A.createBiquadFilter();f.type='lowpass';f.frequency.value=700;
+  gn.gain.setValueAtTime(0.0001,t);gn.gain.linearRampToValueAtTime(.035,t+1.2);gn.gain.setValueAtTime(.035,t+2.2);gn.gain.exponentialRampToValueAtTime(.0001,t+4.5);
+  f.connect(gn);gn.connect(bus);
+  [233,311].forEach(fr=>{const o=A.createOscillator();o.type='sawtooth';o.frequency.value=fr;o.connect(f);o.start(t);o.stop(t+4.6)});
+}
+function loopRand(minMs,maxMs,fn){
+  let alive=true,id=null;
+  (function go(){if(!alive)return;fn();id=setTimeout(go,minMs+Math.random()*(maxMs-minMs))})();
+  return()=>{alive=false;clearTimeout(id)};
+}
+function thump(){drop(95,45,.22,.55);drop(190,90,.12,.18)}
+
+/* ---------- rooms ---------- */
+const R=[
+/* 1 */{
+ name:'The Silence After the Bell',tag:'Room 1 · Exam hall',
+ cap:'The pen stops. Two hundred people breathe out at once. The wall clock keeps going, but you cannot hear it, and the dust in the sunlight is the only other thing moving.',
+ init(s){s.p=Array.from({length:90},()=>({x:Math.random(),y:Math.random(),r:Math.random()*1.7+.4,v:Math.random()*.015+.004,ph:Math.random()*6}))},
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  c.fillStyle='#15110d';c.fillRect(0,0,W,H);
+  let g=c.createLinearGradient(0,H*.68,0,H);g.addColorStop(0,'#241b12');g.addColorStop(1,'#0b0806');c.fillStyle=g;c.fillRect(0,H*.68,W,H*.32);
+  const g2=c.createLinearGradient(W,0,W*.3,H);g2.addColorStop(0,'rgba(255,225,170,.46)');g2.addColorStop(1,'rgba(255,225,170,0)');
+  c.save();c.beginPath();c.moveTo(W*.58,0);c.lineTo(W,0);c.lineTo(W*.6,H);c.lineTo(W*.05,H);c.closePath();c.clip();
+  c.fillStyle=g2;c.fillRect(0,0,W,H);
+  c.strokeStyle='rgba(10,8,6,.6)';c.lineWidth=9*u;
+  for(let k=1;k<3;k++){const x=W*(.58+k*.14);c.beginPath();c.moveTo(x,0);c.lineTo(x-W*.5,H);c.stroke()}
+  c.beginPath();c.moveTo(W*.3,H*.62);c.lineTo(W,H*.05);c.stroke();
+  c.restore();
+  s.p.forEach(p=>{
+   const x=(p.x+Math.sin(t*.0002+p.ph)*.02)*W,y=((p.y+t*p.v*.0001*60)%1)*H;
+   c.fillStyle='rgba(255,236,200,'+(.2+.5*Math.abs(Math.sin(t*.0005+p.ph)))+')';
+   c.beginPath();c.arc(x,y,p.r*u+.2,0,7);c.fill();
+  });
+  for(let i=0;i<5;i++){
+   const x=W*(.08+i*.18),y=H*.74,lit=Math.max(0,1-Math.abs(i*.18-.45)*2.4)*.25;
+   c.fillStyle='rgb('+(14+lit*60)+','+(10+lit*45)+','+(7+lit*25)+')';
+   c.fillRect(x,y,W*.1,H*.035);c.fillRect(x+W*.01,y+H*.035,W*.012,H*.15);c.fillRect(x+W*.078,y+H*.035,W*.012,H*.15);
+   c.fillRect(x+W*.02,y-H*.12,W*.06,H*.1);
+  }
+  /* wall clock */
+  const cx=W*.13,cy=H*.17,r=30*u;
+  c.fillStyle='#e8dfcd';c.beginPath();c.arc(cx,cy,r,0,7);c.fill();
+  c.strokeStyle='#2a2118';c.lineWidth=3*u;c.stroke();
+  c.strokeStyle='#2a2118';c.lineWidth=1*u;
+  for(let k=0;k<12;k++){const a=k*Math.PI/6;c.beginPath();c.moveTo(cx+Math.sin(a)*r*.82,cy-Math.cos(a)*r*.82);c.lineTo(cx+Math.sin(a)*r*.93,cy-Math.cos(a)*r*.93);c.stroke()}
+  const hand=(a,l,w)=>{c.lineWidth=w*u;c.beginPath();c.moveTo(cx,cy);c.lineTo(cx+Math.sin(a)*r*l,cy-Math.cos(a)*r*l);c.stroke()};
+  hand(Math.PI*2*(10/12+.17/12),.5,2.5);hand(Math.PI*2*(10/60),.8,1.6);
+  c.strokeStyle='#a3281c';hand(Math.PI*2*(Math.floor(t/1000)%60)/60,.88,.8);
+ },
+ snd(){return[noise(230,.5,.05),noise(1200,.3,.004,'bandpass'),loopRand(7000,15000,()=>burst(380,3,.35,.05))]}
+},
+/* 2 */{
+ name:'The Silence Before the Wi-Fi Connects',tag:'Room 2 · Hostel corridor',
+ cap:'The ring that gets to 97% and thinks about it. Down in the corner a router blinks amber at nobody. Everyone has waited here. Nobody was ever bored enough to leave.',
+ init(s){},
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  const bg=c.createLinearGradient(0,0,0,H);bg.addColorStop(0,'#0b1118');bg.addColorStop(1,'#060a0f');c.fillStyle=bg;c.fillRect(0,0,W,H);
+  const cx=W/2,cy=H*.4,r=Math.min(W,H)*.13,p=.97*(.5-.5*Math.cos(t*.0007));
+  const gl=c.createRadialGradient(cx,cy,r*.3,cx,cy,r*3);gl.addColorStop(0,'rgba(120,180,255,.14)');gl.addColorStop(1,'rgba(120,180,255,0)');c.fillStyle=gl;c.fillRect(0,0,W,H);
+  c.lineWidth=6*u;c.lineCap='round';
+  c.strokeStyle='rgba(120,170,220,.15)';c.beginPath();c.arc(cx,cy,r,0,7);c.stroke();
+  c.strokeStyle='rgba(140,200,255,.92)';c.beginPath();c.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+p*Math.PI*2);c.stroke();
+  c.fillStyle='rgba(200,225,255,.75)';c.font=(16*u+2)+'px system-ui,sans-serif';c.textAlign='center';
+  c.fillText('Connecting'+'.'.repeat(1+Math.floor(t/500)%3),cx,cy+r+40*u);
+  c.fillStyle='rgba(200,225,255,.4)';c.font=(13*u+1)+'px system-ui,sans-serif';c.fillText(Math.round(p*100)+'%',cx,cy+5);
+  /* router */
+  const rx=W/2-110*u,ry=H*.78,rw=220*u,rh=34*u;
+  const rg=c.createLinearGradient(0,ry,0,ry+rh);rg.addColorStop(0,'#242a33');rg.addColorStop(1,'#12161c');c.fillStyle=rg;c.beginPath();c.roundRect(rx,ry,rw,rh,6*u);c.fill();
+  c.strokeStyle='#2f3742';c.lineWidth=1;c.stroke();
+  c.strokeStyle='#1a1f26';c.lineWidth=5*u;[.18,.82].forEach(f=>{c.beginPath();c.moveTo(rx+rw*f,ry);c.lineTo(rx+rw*(f+(f<.5?-.06:.06)),ry-70*u);c.stroke()});
+  const leds=[[1,'80,255,140'],[Math.sin(t*.011*(1+Math.sin(t*.001)))>0?1:.15,'80,255,140'],[Math.floor(t/900)%2?1:.12,'255,170,40'],[.05,'80,255,140']];
+  leds.forEach(([a,col],i)=>{
+   const lx=rx+rw*(.28+i*.14),ly=ry+rh/2;
+   const lg=c.createRadialGradient(lx,ly,0,lx,ly,16*u);lg.addColorStop(0,'rgba('+col+','+.55*a+')');lg.addColorStop(1,'rgba('+col+',0)');c.fillStyle=lg;c.fillRect(lx-20*u,ly-20*u,40*u,40*u);
+   c.fillStyle='rgba('+col+','+(.15+.85*a)+')';c.beginPath();c.arc(lx,ly,3.2*u,0,7);c.fill();
+  });
+ },
+ snd(){return[noise(300,.4,.045),tone(120,.006),tone(240,.003),loopRand(2500,9000,()=>burst(3200,8,.05,.035))]}
+},
+/* 3 */{
+ name:'The 3 AM Silence',tag:'Room 3 · One light left on',
+ cap:'Only the fridge is awake. Somewhere in that city a single window is still lit, and you wonder who is behind it and what they are not saying.',
+ init(s){
+  s.st=Array.from({length:130},()=>({x:Math.random(),y:Math.random()*.65,r:Math.random()*1.2+.3,ph:Math.random()*9}));
+  s.b=[];let x=-.01;while(x<1){const w=.06+Math.random()*.07,h=.22+Math.random()*.3,cols=3+Math.floor(w*40),rows=Math.max(3,Math.round(h*16));
+   const lit=Array.from({length:cols*rows},()=>Math.random()<.1);s.b.push({x,w,h,cols,rows,lit});x+=w+.004}
+  s.sp=Math.floor(s.b.length/2);
+ },
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  const g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,'#04060d');g.addColorStop(.7,'#0e1429');g.addColorStop(1,'#1b1f33');
+  c.fillStyle=g;c.fillRect(0,0,W,H);
+  s.st.forEach(a=>{c.fillStyle='rgba(255,255,255,'+(.2+.5*Math.abs(Math.sin(t*.0006+a.ph)))+')';c.beginPath();c.arc(a.x*W,a.y*H,a.r*u+.2,0,7);c.fill()});
+  const mx=W*.82,my=H*.2,mr=22*u;
+  const mg=c.createRadialGradient(mx,my,mr*.5,mx,my,mr*6);mg.addColorStop(0,'rgba(200,220,255,.28)');mg.addColorStop(1,'rgba(200,220,255,0)');c.fillStyle=mg;c.fillRect(0,0,W,H);
+  c.fillStyle='#dfe8f7';c.beginPath();c.arc(mx,my,mr,0,7);c.fill();
+  c.fillStyle='#0e1429';c.beginPath();c.arc(mx+mr*.35,my-mr*.1,mr*.92,0,7);c.fill();
+  s.b.forEach((b,bi)=>{
+   const bx=b.x*W,bw=b.w*W,bh=b.h*H,by=H-bh;
+   c.fillStyle='#05060b';c.fillRect(bx,by,bw,bh);
+   const cw=bw/b.cols,rh=bh/(b.rows+1);
+   for(let r=0;r<b.rows;r++)for(let k=0;k<b.cols;k++){
+    const i=r*b.cols+k;let on=b.lit[i],a=.5;
+    if(bi===s.sp&&i===Math.floor(b.lit.length/2)){on=true;a=.8+.2*Math.sin(t*.003)}
+    if(on){c.fillStyle='rgba(255,200,120,'+a+')';c.fillRect(bx+k*cw+cw*.22,by+(r+.4)*rh,cw*.5,rh*.45)}
+   }
+  });
+  const sb=s.b[s.sp],sx=sb.x*W+sb.w*W/2,sy=H-sb.h*H+sb.h*H*.5;
+  const sg=c.createRadialGradient(sx,sy,2,sx,sy,70*u);sg.addColorStop(0,'rgba(255,200,120,.3)');sg.addColorStop(1,'rgba(255,200,120,0)');c.fillStyle=sg;c.fillRect(sx-80*u,sy-80*u,160*u,160*u);
+ },
+ snd(){return[tone(50,.022),tone(100,.009),tone(150,.004),noise(140,.6,.07),loopRand(9000,22000,()=>{drop(60,40,.5,.06);burst(200,1,.3,.05)})]}
+},
+/* 4 */{
+ name:'The Silence After Rain',tag:'Room 4 · Click the water',
+ cap:'The sky has said everything it needed to. What is left is one leaf, one slow drop, and the long wait before it lets go. Click the water to add your own.',
+ init(s){s.r=[];s.n=3000;s.ds='grow';s.t0=null;s.y=0;s.vy=0;s.last=0;s.dx=W*(.35+.3*Math.random());
+  s.add=(x,y,t)=>s.r.push({x,y,t0:t});
+  cv.onclick=e=>{const b=cv.getBoundingClientRect(),y=e.clientY-b.top;if(y<H*.55)return;s.add(e.clientX-b.left,y,performance.now());drop(900,1900,.18,.2)}},
+ draw(s,t){
+  const wy=H*.8;
+  let g=c.createLinearGradient(0,0,0,H*.55);g.addColorStop(0,'#101c20');g.addColorStop(1,'#1c2e33');c.fillStyle=g;c.fillRect(0,0,W,H*.55);
+  g=c.createLinearGradient(0,H*.55,0,H);g.addColorStop(0,'#2a4248');g.addColorStop(.35,'#16262b');g.addColorStop(1,'#080e10');c.fillStyle=g;c.fillRect(0,H*.55,W,H*.45);
+  c.fillStyle='rgba(180,220,230,.07)';for(let i=0;i<7;i++){c.fillRect(W*(.1+i*.12),H*(.57+i*.015),W*.07,2)}
+  /* leaf */
+  c.save();c.translate(s.dx,0);c.fillStyle='#050a0a';c.beginPath();c.moveTo(-90,-10);c.quadraticCurveTo(-40,38,0,20);c.quadraticCurveTo(20,16,26,2);c.lineTo(-90,-10);c.fill();c.restore();
+  if(s.t0===null){s.t0=t;s.last=t}
+  const dt=Math.min(40,t-s.last);s.last=t;
+  if(s.ds==='grow'){
+   const k=Math.min(1,(t-s.t0)/3000);
+   c.fillStyle='rgba(190,230,240,.85)';c.beginPath();c.ellipse(s.dx,20+k*6,1.5+k*3.2,2+k*5,0,0,7);c.fill();
+   if(k>=1){s.ds='fall';s.y=26;s.vy=0}
+  }else if(s.ds==='fall'){
+   s.vy+=.0013*dt;s.y+=s.vy*dt;
+   c.fillStyle='rgba(190,230,240,.85)';c.beginPath();c.ellipse(s.dx,s.y,3.5,6.5,0,0,7);c.fill();
+   if(s.y>=wy){s.add(s.dx,wy,t);drop(700,2100,.22,.3);s.ds='wait';s.t0=t+2000+Math.random()*3500;s.n=0}
+  }else if(t>=s.t0){s.ds='grow';s.t0=t}
+  if(t>s.n&&s.ds!=='fall'){s.n=t+7000+Math.random()*5000;s.add(Math.random()*W,H*.65+Math.random()*H*.3,t)}
+  s.r=s.r.filter(q=>t-q.t0<4200);
+  s.r.forEach(q=>{
+   const a=1-(t-q.t0)/4200;
+   for(let k=0;k<3;k++){
+    const rr=(t-q.t0)*.045-k*10;if(rr<0)continue;
+    c.strokeStyle='rgba(170,230,240,'+(a*.55*(1-k*.25))+')';c.lineWidth=1.3;
+    c.beginPath();c.ellipse(q.x,q.y,rr*1.7,rr*.5,0,0,7);c.stroke();
+   }
+  });
+ },
+ snd(s){return[noise(2500,.3,.012,'highpass',.08,.8),noise(450,.5,.03),noise(900,2,.01,'bandpass',.05,.9)]}
+},
+/* 5 */{
+ name:'The Silence of an Unsent Message',tag:'Room 5 · Draft, 2:47 AM',
+ cap:'It was typed, deleted, typed again. The loudest silence in the world is a cursor blinking at the end of a sentence you could not finish.',
+ init(s){s.L=['I know I should have said this earlier, but','I did not mean it the way it sounded,','Are you still angry about','hey'];s.i=0;s.n=0;s.mode='type';s.next=0},
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  c.fillStyle='#08060b';c.fillRect(0,0,W,H);
+  const gl=c.createRadialGradient(W/2,H/2,10,W/2,H/2,Math.max(W,H)*.6);gl.addColorStop(0,'rgba(120,90,200,.22)');gl.addColorStop(1,'rgba(120,90,200,0)');c.fillStyle=gl;c.fillRect(0,0,W,H);
+  const bw=Math.min(W*.82,540),bx=(W-bw)/2,by=H/2-30*u;
+  c.fillStyle='rgba(235,225,255,.55)';c.font=(13*u+1)+'px system-ui,sans-serif';c.textAlign='center';c.fillText('Friend · last seen 2:47 AM',W/2,by-34*u);
+  c.fillStyle='#211c2b';c.beginPath();c.roundRect(bx,by,bw,64*u,32*u);c.fill();
+  c.strokeStyle='rgba(180,150,255,.25)';c.lineWidth=1;c.stroke();
+  const line=s.L[s.i];
+  if(t>s.next){
+   if(s.mode==='type'){
+    if(s.n<line.length){s.n++;burst(2400+Math.random()*900,4,.03,.12);s.next=t+85+Math.random()*130}
+    else{s.mode='wait';s.next=t+1700}
+   }else if(s.mode==='wait'){s.mode='del';s.next=t+10}
+   else{
+    if(s.n>0){s.n--;burst(1900,4,.025,.1);s.next=t+24}
+    else{s.mode='type';s.i=(s.i+1)%s.L.length;s.next=t+1000}
+   }
+  }
+  c.font=(17*u+1)+'px system-ui,sans-serif';c.textAlign='left';c.fillStyle='rgba(245,238,255,.92)';
+  let shown=line.slice(0,s.n);
+  while(c.measureText(shown).width>bw-64*u)shown=shown.slice(1);
+  c.fillText(shown,bx+28*u,by+39*u);
+  if(Math.floor(t/520)%2===0){const w=c.measureText(shown).width;c.fillStyle='rgba(245,238,255,.95)';c.fillRect(bx+30*u+w,by+20*u,2,26*u)}
+ },
+ snd(){return[noise(250,.4,.03),tone(60,.008)]}
+},
+/* 6 */{
+ name:'The Silence Between Two Friends',tag:'Room 6 · Almost',
+ cap:'Neither one is wrong. Both are waiting for the other to text first. On two phones, two sets of dots start and stop. The gap between them is the whole exhibit.',
+ init(s){},
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  c.fillStyle='#120d10';c.fillRect(0,0,W,H);
+  const cx=W/2,cy=H*.4;
+  const ax=cx-(80+40*Math.sin(t*.0007))*u*1.4,ay=cy+30*u*Math.sin(t*.0005);
+  const bx=cx+(80+40*Math.sin(t*.0007+1))*u*1.4,by=cy-30*u*Math.sin(t*.0005+2);
+  c.setLineDash([2,8]);c.strokeStyle='rgba(255,180,190,.25)';c.lineWidth=1.2;c.beginPath();c.moveTo(ax,ay);c.lineTo(bx,by);c.stroke();c.setLineDash([]);
+  [[ax,ay,'255,150,120'],[bx,by,'150,170,255']].forEach(([x,y,col])=>{
+   const g=c.createRadialGradient(x,y,2,x,y,46*u+10);g.addColorStop(0,'rgba('+col+',.9)');g.addColorStop(1,'rgba('+col+',0)');
+   c.fillStyle=g;c.beginPath();c.arc(x,y,46*u+10,0,7);c.fill();
+   c.fillStyle='rgb('+col+')';c.beginPath();c.arc(x,y,9*u+3,0,7);c.fill();
+  });
+  c.fillStyle='rgba(255,220,225,.6)';c.font='italic '+(15*u+2)+'px Georgia,serif';c.textAlign='center';
+  c.fillText('almost',(ax+bx)/2,(ay+by)/2-16*u);
+  /* two phones */
+  [[W*.27,'255,150,120',0],[W*.73,'150,170,255',1.7]].forEach(([px,col,ph])=>{
+   const pw=70*u,ph2=118*u,py=H*.62;
+   c.fillStyle='#0a0709';c.beginPath();c.roundRect(px-pw/2,py,pw,ph2,10*u);c.fill();
+   const sg=c.createLinearGradient(0,py,0,py+ph2);sg.addColorStop(0,'rgba('+col+',.2)');sg.addColorStop(1,'rgba('+col+',.06)');
+   c.fillStyle=sg;c.beginPath();c.roundRect(px-pw/2+4*u,py+5*u,pw-8*u,ph2-10*u,7*u);c.fill();
+   const on=Math.sin(t*.0009+ph)>-.2;
+   if(on){c.fillStyle='rgba('+col+',.7)';for(let d=0;d<3;d++){const a=.3+.7*Math.max(0,Math.sin(t*.005-d*.9+ph));c.globalAlpha=a;c.beginPath();c.arc(px-10*u+d*10*u,py+ph2-26*u,2.6*u,0,7);c.fill()}c.globalAlpha=1}
+  });
+ },
+ snd(){return[tone(196,.011),tone(293.66,.008),tone(392,.003),noise(200,.4,.03)]}
+},
+/* 7 */{
+ name:'The Silence Before Results Day',tag:'Room 7 · Refresh, refresh',
+ cap:'The page says the result is being declared. You have refreshed it eleven times. Somewhere a server knows what you do not, and the only sound is your own heart.',
+ init(s){},
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  c.fillStyle='#0d1117';c.fillRect(0,0,W,H);
+  const bw=Math.min(W*.72,520),bh=H*.66,bx=(W-bw)/2,by=H*.14;
+  c.fillStyle='#161b22';c.beginPath();c.roundRect(bx,by,bw,bh,12*u);c.fill();c.strokeStyle='#2a313c';c.lineWidth=1;c.stroke();
+  c.fillStyle='rgba(235,240,250,.88)';c.font=(20*u+2)+'px system-ui,sans-serif';c.textAlign='center';c.fillText('Examination Results',W/2,by+46*u);
+  c.fillStyle='rgba(160,170,190,.7)';c.font=(13*u+1)+'px system-ui,sans-serif';c.fillText('Your result is being declared'+'.'.repeat(1+Math.floor(t/600)%3),W/2,by+70*u);
+  for(let i=0;i<3;i++){
+   const lx=bx+30*u,ly=by+100*u+i*34*u,lw=bw-60*u,lh=16*u;
+   c.fillStyle='#202733';c.beginPath();c.roundRect(lx,ly,lw,lh,6*u);c.fill();
+   const sh=((t*.0006+i*.25)%1.6-.3)*lw;
+   c.save();c.beginPath();c.roundRect(lx,ly,lw,lh,6*u);c.clip();
+   const g=c.createLinearGradient(lx+sh,0,lx+sh+120*u,0);g.addColorStop(0,'rgba(255,255,255,0)');g.addColorStop(.5,'rgba(255,255,255,.12)');g.addColorStop(1,'rgba(255,255,255,0)');
+   c.fillStyle=g;c.fillRect(lx,ly,lw,lh);c.restore();
+  }
+  const btx=W/2-70*u,bty=by+bh-62*u;
+  c.fillStyle='#232a35';c.beginPath();c.roundRect(btx,bty,140*u,38*u,8*u);c.fill();
+  c.fillStyle='rgba(170,180,200,.5)';c.font=(14*u+1)+'px system-ui,sans-serif';c.fillText('View Result',W/2,bty+24*u);
+  const k=Math.sin(t*.0013)*10*u+Math.sin(t*.011)*1.2,cxp=btx+95*u+k,cyp=bty+26*u+Math.cos(t*.0017)*5*u;
+  c.fillStyle='#fff';c.strokeStyle='#000';c.lineWidth=1.2;c.beginPath();c.moveTo(cxp,cyp);c.lineTo(cxp,cyp+16*u);c.lineTo(cxp+4*u,cyp+12.5*u);c.lineTo(cxp+8*u,cyp+19*u);c.lineTo(cxp+10.5*u,cyp+18*u);c.lineTo(cxp+6.5*u,cyp+11.5*u);c.lineTo(cxp+12*u,cyp+11*u);c.closePath();c.fill();c.stroke();
+  const beat=Math.max(0,Math.sin(t*.0068))**6;
+  c.strokeStyle='rgba(255,90,90,'+(.1+.4*beat)+')';c.lineWidth=2+beat*5;c.strokeRect(2,2,W-4,H-4);
+ },
+ snd(){return[noise(180,.5,.03),loopRand(880,880,()=>{thump();setTimeout(thump,230)})]}
+},
+/* 8 */{
+ name:'The Silence After the Last Train',tag:'Room 8 · Platform 2, 11:58 PM',
+ cap:'The tail lights shrink until they are a rumour. The platform stays warm for a minute. Nobody gets down to the tracks, and nobody says anything.',
+ init(s){s.fog=Array.from({length:18},()=>({x:Math.random(),y:.38+Math.random()*.3,r:60+Math.random()*120,v:.00002+Math.random()*.00004,a:.04+Math.random()*.05}))},
+ draw(s,t){
+  const u=Math.min(W,H)/450,vx=W*.5,vy=H*.42;
+  let g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,'#04070b');g.addColorStop(.45,'#101a22');g.addColorStop(1,'#0a0d10');c.fillStyle=g;c.fillRect(0,0,W,H);
+  /* ballast */
+  c.fillStyle='#0f1114';c.beginPath();c.moveTo(vx,vy);c.lineTo(W*.78,H);c.lineTo(W*.22,H);c.closePath();c.fill();
+  /* sleepers */
+  for(let i=0;i<14;i++){const f=Math.pow((i+((t*.00008)%1)*0)/14,2.2),y=vy+(H-vy)*f,hw=(W*.14)*f+2;c.fillStyle='rgba(60,45,30,'+(.25+f*.6)+')';c.fillRect(vx-hw*1.7,y,hw*3.4,2+f*7*u)}
+  /* rails */
+  c.strokeStyle='rgba(150,165,180,.5)';c.lineWidth=2*u;
+  [[.38],[.62]].forEach(([e])=>{c.beginPath();c.moveTo(vx,vy);c.lineTo(W*e,H);c.stroke()});
+  /* platform left */
+  c.fillStyle='#1a1d22';c.beginPath();c.moveTo(vx-3,vy);c.lineTo(W*.3,H);c.lineTo(0,H);c.lineTo(0,vy+H*.08);c.closePath();c.fill();
+  c.strokeStyle='rgba(230,190,40,.65)';c.lineWidth=3*u;c.beginPath();c.moveTo(vx-4,vy+2);c.lineTo(W*.31,H);c.stroke();
+  /* lamp posts */
+  for(let i=0;i<5;i++){const f=Math.pow((i+.5)/5,2),x=vx-(vx-W*.18)*f-6,y0=vy+(H-vy)*f*.3,h=(H*.28)*f+6;
+   c.fillStyle='#07090c';c.fillRect(x,y0-h,2*u+f*3,h);
+   const lg=c.createRadialGradient(x,y0-h,0,x,y0-h,50*u*f+14);lg.addColorStop(0,'rgba(255,215,140,.55)');lg.addColorStop(1,'rgba(255,215,140,0)');
+   c.fillStyle=lg;c.fillRect(x-80,y0-h-80,160,160);c.fillStyle='rgba(255,230,170,.95)';c.beginPath();c.arc(x,y0-h,2+f*4,0,7);c.fill()}
+  /* signal */
+  c.fillStyle='rgba(255,60,50,'+(.5+.5*(Math.floor(t/700)%2))+')';c.beginPath();c.arc(vx+W*.04,vy-H*.05,3*u,0,7);c.fill();
+  /* departing tail lights */
+  const d=(t%32000)/32000,p=Math.pow(1-d,1.6),ty=vy+(H-vy)*p*.55,tw=36*u*p+1.5;
+  const alpha=Math.min(1,(1-d)*2.2);
+  [vx-tw,vx+tw].forEach(x=>{const lg=c.createRadialGradient(x,ty,0,x,ty,16*u*p+4);lg.addColorStop(0,'rgba(255,50,40,'+.8*alpha+')');lg.addColorStop(1,'rgba(255,50,40,0)');c.fillStyle=lg;c.fillRect(x-30*u,ty-30*u,60*u,60*u)});
+  /* fog */
+  s.fog.forEach(f=>{f.x=(f.x+f.v*16)%1.2;const x=(f.x-.1)*W,y=f.y*H,gg=c.createRadialGradient(x,y,0,x,y,f.r*u);gg.addColorStop(0,'rgba(170,190,205,'+f.a+')');gg.addColorStop(1,'rgba(170,190,205,0)');c.fillStyle=gg;c.fillRect(x-f.r*u,y-f.r*u,f.r*2*u,f.r*2*u)});
+ },
+ snd(){return[noise(500,.6,.06,'bandpass',.07,.9),noise(150,.4,.05),loopRand(18000,34000,horn)]}
+}
+,/* 9 */{
+ name:'The Room That Listens',tag:'Room 9 · Do not make a sound',
+ cap:'The only exhibit that does not exist until you are quiet. Let the museum listen to your real room. Every silent second grows a tree of light. One cough, one word, one laugh, and it shatters. Nothing is recorded or sent anywhere.',
+ init(s){
+  s.mode='ask';s.sil=0;s.best=0;s.last=0;s.parts=[];s.tips=[];s.floor=0;s.cal=0;s.loud=0;s.flash=0;s.level=0;s.thr=0;s.calib=false;
+  s.seed=Array.from({length:1024},()=>Math.random()-.5);
+  s.stars=Array.from({length:90},()=>({x:Math.random(),y:Math.random()*.8,r:Math.random()*1.1+.3,ph:Math.random()*9}));
+  s.act=performance.now();
+  try{s.best=parseFloat(localStorage.getItem('mos_best'))||0}catch(e){}
+  s.actf=()=>{s.act=performance.now()};
+  s.startStill=()=>{s.mode='still';s.act=performance.now();addEventListener('pointermove',s.actf);addEventListener('keydown',s.actf);addEventListener('pointerdown',s.actf)};
+  cv.onclick=async()=>{
+   if(s.mode!=='ask')return;
+   s.mode='wait';
+   try{
+    const st=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    const ac=new (window.AudioContext||window.webkitAudioContext)();await ac.resume();
+    const an=ac.createAnalyser();an.fftSize=1024;ac.createMediaStreamSource(st).connect(an);
+    s.st=st;s.ac=ac;s.an=an;s.buf=new Float32Array(an.fftSize);s.cal=performance.now();s.floor=0;s.mode='mic';
+   }catch(e){s.startStill()}
+  };
+ },
+ leave(s){
+  try{s.st&&s.st.getTracks().forEach(t=>t.stop())}catch(e){}
+  try{s.ac&&s.ac.close()}catch(e){}
+  removeEventListener('pointermove',s.actf);removeEventListener('keydown',s.actf);removeEventListener('pointerdown',s.actf);
+ },
+ draw(s,t){
+  const u=Math.min(W,H)/450;
+  if(!s.last)s.last=t;const dt=Math.min(60,t-s.last)/1000;s.last=t;
+  const g=c.createLinearGradient(0,0,0,H);g.addColorStop(0,'#05060c');g.addColorStop(1,'#0a1118');c.fillStyle=g;c.fillRect(0,0,W,H);
+  s.stars.forEach(a=>{c.fillStyle='rgba(255,255,255,'+(.15+.4*Math.abs(Math.sin(t*.0005+a.ph)))+')';c.beginPath();c.arc(a.x*W,a.y*H,a.r*u+.2,0,7);c.fill()});
+  /* measure */
+  let loud=false;s.calib=false;
+  if(s.mode==='mic'){
+   s.an.getFloatTimeDomainData(s.buf);let sum=0;for(let i=0;i<s.buf.length;i++)sum+=s.buf[i]*s.buf[i];
+   s.level=Math.sqrt(sum/s.buf.length);
+   const el=(performance.now()-s.cal)/1000;
+   if(el<1.8){s.calib=true;s.floor=Math.max(s.floor,s.level)}
+   else{s.thr=Math.max(s.floor*2.2,s.floor+.012);loud=s.level>s.thr}
+  }else if(s.mode==='still'){loud=(performance.now()-s.act)<180}
+  const running=(s.mode==='mic'&&!s.calib)||s.mode==='still';
+  if(running){
+   if(loud){s.loud+=dt;if(s.loud>.07)shatter()}else{s.loud=0;s.sil+=dt}
+  }
+  function shatter(){
+   if(s.sil>1.5){
+    const n=Math.min(220,s.tips.length*2);
+    for(let i=0;i<n;i++){const q=s.tips[i%s.tips.length];s.parts.push({x:q[0],y:q[1],vx:(Math.random()-.5)*260*u,vy:-Math.random()*140*u,a:1})}
+    s.flash=1;
+   }
+   if(s.sil>s.best){s.best=s.sil;try{localStorage.setItem('mos_best',String(s.best))}catch(e){}}
+   s.sil=0;s.loud=0;
+  }
+  /* tree of light */
+  s.tips=[];
+  const grow=Math.min(1,s.sil/35),Lv=s.sil>.2?grow*9+.6:0;
+  const br=(x,y,len,ang,d,id)=>{
+   const f=Math.max(0,Math.min(1,Lv-d));if(f<=0)return;
+   const sw=Math.sin(t*.0006+d*.7)*.012;
+   const l=len*f,x2=x+Math.sin(ang+sw)*l,y2=y-Math.cos(ang+sw)*l;
+   c.strokeStyle='rgba(150,220,255,'+(.22+.6*f)+')';c.lineWidth=Math.max(.7,(9-d)*1.15*u);c.lineCap='round';
+   c.beginPath();c.moveTo(x,y);c.lineTo(x2,y2);c.stroke();
+   if(d>=8||f<1){
+    s.tips.push([x2,y2]);
+    c.fillStyle='rgba(180,255,225,.14)';c.beginPath();c.arc(x2,y2,8*u,0,7);c.fill();
+    c.fillStyle='rgba(215,255,240,.95)';c.beginPath();c.arc(x2,y2,2.2*u,0,7);c.fill();
+   }
+   if(f>=1&&d<9){
+    const j=s.seed[id%1024]*.35;
+    br(x2,y2,len*.74,ang-.4+j,d+1,id*2);
+    br(x2,y2,len*.74,ang+.4+j,d+1,id*2+1);
+   }
+  };
+  if(Lv>0){
+   const rg=c.createRadialGradient(W/2,H*.8,10,W/2,H*.8,H*.6);rg.addColorStop(0,'rgba(120,200,255,'+(.06+.12*grow)+')');rg.addColorStop(1,'rgba(120,200,255,0)');c.fillStyle=rg;c.fillRect(0,0,W,H);
+  }
+  br(W/2,H*.93,H*.2,0,0,1);
+  /* shards */
+  s.parts=s.parts.filter(p=>p.a>0);
+  s.parts.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=300*u*dt;p.a-=dt*.45;c.fillStyle='rgba(200,240,255,'+Math.max(0,p.a)+')';c.fillRect(p.x,p.y,2.5*u+1,2.5*u+1)});
+  if(s.flash>0){c.fillStyle='rgba(255,255,255,'+(s.flash*.22)+')';c.fillRect(0,0,W,H);s.flash-=dt*1.6}
+  /* overlay text */
+  c.textAlign='center';
+  if(s.mode==='ask'||s.mode==='wait'){
+   c.fillStyle='rgba(235,245,255,.92)';c.font=(22*u+2)+'px Georgia,serif';c.fillText(s.mode==='ask'?'Click to let the museum listen':'Waiting for permission…',W/2,H*.44);
+   c.fillStyle='rgba(180,200,225,.65)';c.font=(13*u+1)+'px system-ui,sans-serif';
+   c.fillText('Nothing is recorded or sent. Loudness is measured on your device only.',W/2,H*.44+30*u);
+   c.fillText('Then stay silent for as long as you can.',W/2,H*.44+50*u);
+  }else if(s.calib){
+   c.fillStyle='rgba(235,245,255,.9)';c.font=(18*u+2)+'px Georgia,serif';c.fillText('Listening to your room…  stay quiet',W/2,H*.44);
+  }else{
+   c.textAlign='right';c.fillStyle='rgba(235,245,255,.9)';c.font=(15*u+2)+'px system-ui,sans-serif';
+   c.fillText('Silence  '+s.sil.toFixed(1)+' s',W-18*u,34*u);
+   c.fillStyle='rgba(170,190,215,.65)';c.font=(12*u+1)+'px system-ui,sans-serif';c.fillText('Best  '+s.best.toFixed(1)+' s',W-18*u,54*u);
+   c.textAlign='center';
+   const m=s.sil>=60?'A full minute. Nobody has ever heard this room so well.':s.sil>=30?'Thirty seconds. Your room is holding its breath.':s.sil>=10?'Ten seconds. The museum is impressed.':'';
+   if(m){c.fillStyle='rgba(215,235,255,.8)';c.font='italic '+(15*u+2)+'px Georgia,serif';c.fillText(m,W/2,H*.12)}
+   if(s.mode==='still'){c.fillStyle='rgba(170,190,215,.6)';c.font=(12*u+1)+'px system-ui,sans-serif';c.fillText('No microphone here, so the museum listens for stillness. Do not touch anything.',W/2,H-14*u)}
+   else{
+    const mx=W*.35,mw=W*.3,my=H-16*u;
+    c.fillStyle='rgba(255,255,255,.1)';c.fillRect(mx,my,mw,4);
+    c.fillStyle=loud?'rgba(255,110,110,.95)':'rgba(140,220,255,.9)';c.fillRect(mx,my,mw*Math.min(1,s.level*8),4);
+    c.fillStyle='rgba(255,255,255,.5)';c.fillRect(mx+mw*Math.min(1,s.thr*8),my-3,1.5,10);
+   }
+  }
+ },
+ snd(){return[]}
+}
+
+];
+
+/* ---------- controller ---------- */
+let cur=-1,S={},tour=null;
+const $=id=>document.getElementById(id);
+const nav=$('rooms');
+R.forEach((r,i)=>{const b=document.createElement('button');b.textContent=i+1;b.title=r.name;b.onclick=()=>go(i);nav.appendChild(b)});
+function killSound(){stops.forEach(f=>{try{f()}catch(e){}});stops=[]}
+function go(i){
+  i=(i+R.length)%R.length;
+  killSound();if(cur>=0&&R[cur].leave)R[cur].leave(S);cv.onclick=null;cur=i;S={};R[i].init(S);
+  if(A&&soundOn)stops=R[i].snd(S)||[];
+  $('ttl').textContent=R[i].name;$('cap').textContent=R[i].cap;$('tag').textContent=R[i].tag;
+  [...nav.children].forEach((b,k)=>b.classList.toggle('on',k===i));
+}
+$('prev').onclick=()=>go(cur-1);$('next').onclick=()=>go(cur+1);
+addEventListener('keydown',e=>{if(e.key==='ArrowRight')go(cur+1);if(e.key==='ArrowLeft')go(cur-1)});
+$('snd').onclick=()=>{
+  initAudio();soundOn=!soundOn;A.resume();
+  master.gain.cancelScheduledValues(A.currentTime);
+  master.gain.linearRampToValueAtTime(soundOn?1:0,A.currentTime+.8);
+  $('snd').textContent='Sound: '+(soundOn?'on':'off');$('snd').classList.toggle('on',soundOn);
+  killSound();if(soundOn)stops=R[cur].snd(S)||[];
+};
+$('tour').onclick=()=>{
+  if(tour){clearInterval(tour);tour=null}else{tour=setInterval(()=>go(cur+1),22000);go(cur+1)}
+  $('tour').classList.toggle('on',!!tour);
+};
+function frame(t){R[cur].draw(S,t);finish(t);requestAnimationFrame(frame)}
+resize();go(0);requestAnimationFrame(frame);
+</script>
+</body>
+</html>
